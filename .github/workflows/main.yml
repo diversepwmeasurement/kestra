@@ -1,440 +1,389 @@
-name: Main
-
-on:
-  push:
-    branches:
-      - master
-      - release
-      - develop
-    tags:
-      - v*
-
-  pull_request:
-    branches:
-      - master
-      - release
-      - develop
-  repository_dispatch:
-    types: [ rebuild ]
-  workflow_dispatch:
-    inputs:
-      skip-test:
-        description: 'Skip test'
-        required: false
-        type: string
-        default: "false"
-      plugin-version:
-        description: 'Plugin version'
-        required: false
-        type: string
-        default: "LATEST"
-
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
+  group: ${{ github.workflow }}-${{ github.ref }}
 jobs:
   check:
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     name: Check & Publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    - continue-on-error: true
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - continue-on-error: true
+      uses: actions/setup-python@v5
+      with:
+        architecture: x64
+        python-version: 3.x
+    - continue-on-error: true
+      uses: actions/setup-node@v4
+      with:
+        check-latest: true
+        node-version: '18'
+    - continue-on-error: true
+      if: ${{ github.event.inputs.skip-test == 'false' || github.event.inputs.skip-test
+        == '' }}
+      name: Build the docker-compose stack
+      run: docker compose -f docker-compose-ci.yml up -d
+    - continue-on-error: true
+      name: Gradle cache
+      uses: actions/cache@v4
+      with:
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle*.properties')
+          }}
+        path: '~/.gradle/caches
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-          architecture: 'x64'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          check-latest: true
+          ~/.gradle/wrapper
 
-      # Services
-      - name: Build the docker-compose stack
-        run: docker compose -f docker-compose-ci.yml up -d
-        if: ${{ github.event.inputs.skip-test == 'false' || github.event.inputs.skip-test == '' }}
+          '
+        restore-keys: '${{ runner.os }}-gradle-
 
-      # Caches
-      - name: Gradle cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle*.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+          '
+    - continue-on-error: true
+      name: Npm cache
+      uses: actions/cache@v4
+      with:
+        key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+        path: ~/.npm
+        restore-keys: '${{ runner.os }}-npm-
 
-      - name: Npm cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
+          '
+    - continue-on-error: true
+      name: Node cache
+      uses: actions/cache@v4
+      with:
+        key: ${{ runner.os }}-node-${{ hashFiles('ui/*.gradle') }}
+        path: node
+        restore-keys: '${{ runner.os }}-node-
 
-      - name: Node cache
-        uses: actions/cache@v4
-        with:
-          path: node
-          key: ${{ runner.os }}-node-${{ hashFiles('ui/*.gradle') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
+          '
+    - continue-on-error: true
+      name: SonarCloud cache
+      uses: actions/cache@v4
+      with:
+        key: ${{ runner.os }}-sonar
+        path: ~/.sonar/cache
+        restore-keys: ${{ runner.os }}-sonar
+    - continue-on-error: true
+      name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: 21
+    - continue-on-error: true
+      name: Validate Gradle wrapper
+      uses: gradle/wrapper-validation-action@v3
+    - continue-on-error: true
+      env:
+        GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+      if: ${{ github.event.inputs.skip-test == 'false' || github.event.inputs.skip-test
+        == '' }}
+      name: Build with Gradle
+      run: 'python3 -m pip install virtualenv
 
-      - name: SonarCloud cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.sonar/cache
-          key: ${{ runner.os }}-sonar
-          restore-keys: ${{ runner.os }}-sonar
+        echo $GOOGLE_SERVICE_ACCOUNT | base64 -d > ~/.gcp-service-account.json
 
-      # JDK
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: 21
+        export GOOGLE_APPLICATION_CREDENTIALS=$HOME/.gcp-service-account.json
 
-      - name: Validate Gradle wrapper
-        uses: gradle/wrapper-validation-action@v3
+        ./gradlew check jacoco javadoc --no-daemon --priority=normal
 
-      # Gradle check
-      - name: Build with Gradle
-        if: ${{ github.event.inputs.skip-test == 'false' || github.event.inputs.skip-test == '' }}
-        env:
-          GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
-        run: |
-          python3 -m pip install virtualenv
-          echo $GOOGLE_SERVICE_ACCOUNT | base64 -d > ~/.gcp-service-account.json
-          export GOOGLE_APPLICATION_CREDENTIALS=$HOME/.gcp-service-account.json
-          ./gradlew check jacoco javadoc --no-daemon --priority=normal
+        '
+    - continue-on-error: true
+      if: success() || failure()
+      name: Test Report
+      uses: mikepenz/action-junit-report@v4
+      with:
+        report_paths: '**/build/test-results/**/TEST-*.xml'
+    - continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      if: ${{ env.SONAR_TOKEN != 0 && (github.event.inputs.skip-test == 'false' ||
+        github.event.inputs.skip-test == '') }}
+      name: Analyze with Sonar
+      run: ./gradlew sonar --info
+    - continue-on-error: true
+      if: ${{ github.event.inputs.skip-test == 'false' || github.event.inputs.skip-test
+        == '' }}
+      uses: codecov/codecov-action@v4
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+    - continue-on-error: true
+      name: Build jars
+      run: ./gradlew executableJar --no-daemon --priority=normal
+    - continue-on-error: true
+      name: Upload jar
+      uses: actions/upload-artifact@v4
+      with:
+        name: jar
+        path: build/libs/
+    - continue-on-error: true
+      name: Upload Executable
+      uses: actions/upload-artifact@v4
+      with:
+        name: exe
+        path: build/executable/
+    - continue-on-error: true
+      if: startsWith(github.ref, 'refs/tags/v')
+      name: Create GitHub release
+      uses: marvinpinto/action-automatic-releases@latest
+      with:
+        files: 'build/executable/*
 
-      # report test
-      - name: Test Report
-        uses: mikepenz/action-junit-report@v4
-        if: success() || failure()
-        with:
-          report_paths: '**/build/test-results/**/TEST-*.xml'
+          '
+        prerelease: false
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+    - continue-on-error: true
+      if: startsWith(github.ref, 'refs/tags/v')
+      name: Flow to add BC
+      run: 'curl --location "http://15.188.182.127:8080/api/v1/executions/webhook/product/release_notes/${{secrets.KESTRA_WEBHOOK_KEY}}"
+        \
 
-      - name: Analyze with Sonar
-        if: ${{ env.SONAR_TOKEN != 0 && (github.event.inputs.skip-test == 'false' || github.event.inputs.skip-test == '') }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: ./gradlew sonar --info
+        --header ''Content-Type: application/json''
 
-      # Codecov
-      - uses: codecov/codecov-action@v4
-        if: ${{ github.event.inputs.skip-test == 'false' || github.event.inputs.skip-test == '' }}
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-
-      # Shadow Jar
-      - name: Build jars
-        run: ./gradlew executableJar --no-daemon --priority=normal
-
-      # Upload artifacts
-      - name: Upload jar
-        uses: actions/upload-artifact@v4
-        with:
-          name: jar
-          path: build/libs/
-
-      - name: Upload Executable
-        uses: actions/upload-artifact@v4
-        with:
-          name: exe
-          path: build/executable/
-
-      # GitHub Release
-      - name: Create GitHub release
-        uses: "marvinpinto/action-automatic-releases@latest"
-        if: startsWith(github.ref, 'refs/tags/v')
-        continue-on-error: true
-        with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          prerelease: false
-          files: |
-            build/executable/*
-
-      - name: Flow to add BC
-        if: startsWith(github.ref, 'refs/tags/v')
-        continue-on-error: true
-        run: |
-          curl --location "http://15.188.182.127:8080/api/v1/executions/webhook/product/release_notes/${{secrets.KESTRA_WEBHOOK_KEY}}" \
-          --header 'Content-Type: application/json'
-
+        '
+    timeout-minutes: 60
   docker:
-    name: Publish docker
-    runs-on: ubuntu-latest
-    needs: check
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
     env:
-      PLUGIN_VERSION: ${{ github.event.inputs.plugin-version != null && github.event.inputs.plugin-version || 'LATEST' }}
+      PLUGIN_VERSION: ${{ github.event.inputs.plugin-version != null && github.event.inputs.plugin-version
+        || 'LATEST' }}
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop' ||
+      github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
+    name: Publish docker
+    needs: check
+    runs-on: self-hosted
+    steps:
+    - continue-on-error: true
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Download executable
+      uses: actions/download-artifact@v4
+      with:
+        name: exe
+        path: build/executable
+    - continue-on-error: true
+      name: Copy exe to image
+      run: 'cp build/executable/* docker/app/kestra && chmod +x docker/app/kestra
+
+        '
+    - continue-on-error: true
+      id: vars
+      name: Set image name
+      run: "TAG=${GITHUB_REF#refs/*/}\nif [[ $TAG = \"master\" ]]\nthen\n  echo \"\
+        tag=latest\" >> $GITHUB_OUTPUT\n  echo \"plugins=${{ matrix.image.plugins\
+        \ }}\" >> $GITHUB_OUTPUT\nelif [[ $TAG == v* ]]\nthen\n  echo \"tag=${TAG}\"\
+        \ >> $GITHUB_OUTPUT\n  echo \"plugins=${{ matrix.image.plugins }}\" >> $GITHUB_OUTPUT\n\
+        else\n  echo \"tag=${TAG}\" >> $GITHUB_OUTPUT\n  echo \"plugins=--repositories=https://s01.oss.sonatype.org/content/repositories/snapshots\
+        \ ${{ matrix.image.plugins }}\" >> $GITHUB_OUTPUT\nfi\n"
+    - continue-on-error: true
+      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
+        || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
+      name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - continue-on-error: true
+      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
+        || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
+      name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - continue-on-error: true
+      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
+        || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
+      name: Login to DockerHub
+      uses: docker/login-action@v3
+      with:
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+    - continue-on-error: true
+      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
+        || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
+      name: Push to Docker Hub
+      uses: docker/build-push-action@v5
+      with:
+        build-args: 'KESTRA_PLUGINS=${{ steps.vars.outputs.plugins }}
+
+          APT_PACKAGES=${{ matrix.image.packages }}
+
+          PYTHON_LIBRARIES=${{ matrix.image.python-libs }}
+
+          '
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: false
+        tags: ${{ format('kestra/kestra:{0}{1}', steps.vars.outputs.tag, matrix.image.name)
+          }}
     strategy:
       matrix:
         image:
-          - name: ""
-            plugins: ""
-            packages: ""
-            python-libs: ""
-          - name: "-full"
-            plugins: >-
-              io.kestra.plugin:plugin-airbyte:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-amqp:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-ansible:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-aws:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-azure:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-cassandra:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-cloudquery:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-compress:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-couchbase:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-crypto:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-databricks:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-dataform:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-dbt:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-debezium-mysql:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-debezium-postgres:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-debezium-sqlserver:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-docker:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-elasticsearch:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-fivetran:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-fs:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-gcp:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-git:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-googleworkspace:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-hightouch:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-as400:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-clickhouse:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-db2:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-duckdb:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-druid:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-mysql:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-oracle:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-pinot:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-postgres:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-redshift:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-rockset:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-snowflake:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-sqlserver:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-trino:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-vectorwise:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-vertica:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-dremio:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-arrow-flight:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-sqlite:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-jdbc-sybase:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-kafka:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-kubernetes:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-malloy:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-modal:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-mongodb:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-mqtt:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-nats:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-neo4j:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-notifications:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-openai:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-powerbi:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-pulsar:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-redis:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-groovy:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-julia:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-jython:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-nashorn:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-node:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-powershell:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-python:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-r:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-ruby:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-script-shell:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-serdes:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-servicenow:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-singer:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-soda:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-solace:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-spark:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-sqlmesh:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-surrealdb:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-terraform:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-tika:$PLUGIN_VERSION
-              io.kestra.plugin:plugin-weaviate:$PLUGIN_VERSION
-              io.kestra.storage:storage-azure:$PLUGIN_VERSION
-              io.kestra.storage:storage-gcs:$PLUGIN_VERSION
-              io.kestra.storage:storage-minio:$PLUGIN_VERSION
-              io.kestra.storage:storage-s3:$PLUGIN_VERSION
-            packages: python3 python3-venv python-is-python3 python3-pip nodejs npm curl zip unzip
-            python-libs: kestra
-    steps:
-      - uses: actions/checkout@v4
-
-      # Artifact
-      - name: Download executable
-        uses: actions/download-artifact@v4
-        with:
-          name: exe
-          path: build/executable
-
-      - name: Copy exe to image
-        run: |
-          cp build/executable/* docker/app/kestra && chmod +x docker/app/kestra
-
-      # Vars
-      - name: Set image name
-        id: vars
-        run: |
-          TAG=${GITHUB_REF#refs/*/}
-          if [[ $TAG = "master" ]]
-          then
-            echo "tag=latest" >> $GITHUB_OUTPUT
-            echo "plugins=${{ matrix.image.plugins }}" >> $GITHUB_OUTPUT
-          elif [[ $TAG == v* ]]
-          then
-            echo "tag=${TAG}" >> $GITHUB_OUTPUT
-            echo "plugins=${{ matrix.image.plugins }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${TAG}" >> $GITHUB_OUTPUT
-            echo "plugins=--repositories=https://s01.oss.sonatype.org/content/repositories/snapshots ${{ matrix.image.plugins }}" >> $GITHUB_OUTPUT
-          fi
-
-      # Docker setup
-      - name: Set up QEMU
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
-        uses: docker/setup-buildx-action@v3
-
-      # Docker Login
-      - name: Login to DockerHub
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-      # Docker Build and push
-      - name: Push to Docker Hub
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v')
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ format('kestra/kestra:{0}{1}', steps.vars.outputs.tag, matrix.image.name) }}
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            KESTRA_PLUGINS=${{ steps.vars.outputs.plugins }}
-            APT_PACKAGES=${{ matrix.image.packages }}
-            PYTHON_LIBRARIES=${{ matrix.image.python-libs }}
-
-  maven:
-    name: Publish to Maven
-    runs-on: ubuntu-latest
-    needs: check
-    if: github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/checkout@v4
-
-      # Caches
-      - name: Gradle cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle*.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Npm cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Node cache
-        uses: actions/cache@v4
-        with:
-          path: node
-          key: ${{ runner.os }}-node-${{ hashFiles('ui/*.gradle') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-
-      # JDK
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: 21
-
-      # Publish
-      - name: Publish package to Sonatype
-        if: github.ref == 'refs/heads/develop'
-        env:
-          ORG_GRADLE_PROJECT_sonatypeUsername: ${{ secrets.SONATYPE_USER }}
-          ORG_GRADLE_PROJECT_sonatypePassword: ${{ secrets.SONATYPE_PASSWORD }}
-          SONATYPE_GPG_KEYID: ${{ secrets.SONATYPE_GPG_KEYID }}
-          SONATYPE_GPG_PASSWORD: ${{ secrets.SONATYPE_GPG_PASSWORD }}
-          SONATYPE_GPG_FILE: ${{ secrets.SONATYPE_GPG_FILE }}
-        run: |
-          mkdir -p ~/.gradle/
-          echo "signing.keyId=${SONATYPE_GPG_KEYID}" > ~/.gradle/gradle.properties
-          echo "signing.password=${SONATYPE_GPG_PASSWORD}" >> ~/.gradle/gradle.properties
-          echo "signing.secretKeyRingFile=${HOME}/.gradle/secring.gpg" >> ~/.gradle/gradle.properties
-          echo ${SONATYPE_GPG_FILE} | base64 -d > ~/.gradle/secring.gpg
-          ./gradlew publishToSonatype --no-daemon --priority=normal
-
-      # Release
-      - name: Release package to Maven Central
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          ORG_GRADLE_PROJECT_sonatypeUsername: ${{ secrets.SONATYPE_USER }}
-          ORG_GRADLE_PROJECT_sonatypePassword: ${{ secrets.SONATYPE_PASSWORD }}
-          SONATYPE_GPG_KEYID: ${{ secrets.SONATYPE_GPG_KEYID }}
-          SONATYPE_GPG_PASSWORD: ${{ secrets.SONATYPE_GPG_PASSWORD }}
-          SONATYPE_GPG_FILE: ${{ secrets.SONATYPE_GPG_FILE }}
-        run: |
-          echo "signing.keyId=${SONATYPE_GPG_KEYID}" > ~/.gradle/gradle.properties
-          echo "signing.password=${SONATYPE_GPG_PASSWORD}" >> ~/.gradle/gradle.properties
-          echo "signing.secretKeyRingFile=${HOME}/.gradle/secring.gpg" >> ~/.gradle/gradle.properties
-          echo ${SONATYPE_GPG_FILE} | base64 -d > ~/.gradle/secring.gpg
-          ./gradlew publishToSonatype closeAndReleaseSonatypeStagingRepository --no-daemon --priority=normal
-
+        - name: ''
+          packages: ''
+          plugins: ''
+          python-libs: ''
+        - name: -full
+          packages: python3 python3-venv python-is-python3 python3-pip nodejs npm
+            curl zip unzip
+          plugins: io.kestra.plugin:plugin-airbyte:$PLUGIN_VERSION io.kestra.plugin:plugin-amqp:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-ansible:$PLUGIN_VERSION io.kestra.plugin:plugin-aws:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-azure:$PLUGIN_VERSION io.kestra.plugin:plugin-cassandra:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-cloudquery:$PLUGIN_VERSION io.kestra.plugin:plugin-compress:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-couchbase:$PLUGIN_VERSION io.kestra.plugin:plugin-crypto:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-databricks:$PLUGIN_VERSION io.kestra.plugin:plugin-dataform:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-dbt:$PLUGIN_VERSION io.kestra.plugin:plugin-debezium-mysql:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-debezium-postgres:$PLUGIN_VERSION io.kestra.plugin:plugin-debezium-sqlserver:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-docker:$PLUGIN_VERSION io.kestra.plugin:plugin-elasticsearch:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-fivetran:$PLUGIN_VERSION io.kestra.plugin:plugin-fs:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-gcp:$PLUGIN_VERSION io.kestra.plugin:plugin-git:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-googleworkspace:$PLUGIN_VERSION io.kestra.plugin:plugin-hightouch:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-as400:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-clickhouse:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-db2:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-duckdb:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-druid:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-mysql:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-oracle:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-pinot:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-postgres:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-redshift:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-rockset:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-snowflake:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-sqlserver:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-trino:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-vectorwise:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-vertica:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-dremio:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-arrow-flight:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-jdbc-sqlite:$PLUGIN_VERSION io.kestra.plugin:plugin-jdbc-sybase:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-kafka:$PLUGIN_VERSION io.kestra.plugin:plugin-kubernetes:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-malloy:$PLUGIN_VERSION io.kestra.plugin:plugin-modal:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-mongodb:$PLUGIN_VERSION io.kestra.plugin:plugin-mqtt:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-nats:$PLUGIN_VERSION io.kestra.plugin:plugin-neo4j:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-notifications:$PLUGIN_VERSION io.kestra.plugin:plugin-openai:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-powerbi:$PLUGIN_VERSION io.kestra.plugin:plugin-pulsar:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-redis:$PLUGIN_VERSION io.kestra.plugin:plugin-script-groovy:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-script-julia:$PLUGIN_VERSION io.kestra.plugin:plugin-script-jython:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-script-nashorn:$PLUGIN_VERSION io.kestra.plugin:plugin-script-node:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-script-powershell:$PLUGIN_VERSION io.kestra.plugin:plugin-script-python:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-script-r:$PLUGIN_VERSION io.kestra.plugin:plugin-script-ruby:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-script-shell:$PLUGIN_VERSION io.kestra.plugin:plugin-serdes:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-servicenow:$PLUGIN_VERSION io.kestra.plugin:plugin-singer:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-soda:$PLUGIN_VERSION io.kestra.plugin:plugin-solace:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-spark:$PLUGIN_VERSION io.kestra.plugin:plugin-sqlmesh:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-surrealdb:$PLUGIN_VERSION io.kestra.plugin:plugin-terraform:$PLUGIN_VERSION
+            io.kestra.plugin:plugin-tika:$PLUGIN_VERSION io.kestra.plugin:plugin-weaviate:$PLUGIN_VERSION
+            io.kestra.storage:storage-azure:$PLUGIN_VERSION io.kestra.storage:storage-gcs:$PLUGIN_VERSION
+            io.kestra.storage:storage-minio:$PLUGIN_VERSION io.kestra.storage:storage-s3:$PLUGIN_VERSION
+          python-libs: kestra
   end:
-    runs-on: ubuntu-latest
-    needs:
-      - check
-      - maven
-      - docker
-    if: always()
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    if: always()
+    needs:
+    - check
+    - maven
+    - docker
+    runs-on: self-hosted
     steps:
+    - continue-on-error: true
+      if: github.ref == 'refs/heads/develop'
+      name: Update internal
+      uses: benc-uk/workflow-dispatch@v1
+      with:
+        ref: master
+        repo: kestra-io/infra
+        token: ${{ secrets.GH_PERSONAL_TOKEN }}
+        workflow: oss-build.yml
+    - continue-on-error: true
+      if: ${{ always() && env.SLACK_WEBHOOK_URL != 0 }}
+      name: Slack notification
+      uses: Gamesight/slack-workflow-status@master
+      with:
+        channel: C02DQ1A7JLR
+        icon_emoji: ':github-actions:'
+        name: GitHub Actions
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+  maven:
+    if: github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v')
+    name: Publish to Maven
+    needs: check
+    runs-on: self-hosted
+    steps:
+    - continue-on-error: true
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Gradle cache
+      uses: actions/cache@v4
+      with:
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle*.properties')
+          }}
+        path: '~/.gradle/caches
 
-      # Update
-      - name: Update internal
-        uses: benc-uk/workflow-dispatch@v1
-        if: github.ref == 'refs/heads/develop'
-        with:
-          workflow: oss-build.yml
-          repo: kestra-io/infra
-          ref: master
-          token: ${{ secrets.GH_PERSONAL_TOKEN }}
+          ~/.gradle/wrapper
 
-      # Slack
-      - name: Slack notification
-        uses: Gamesight/slack-workflow-status@master
-        if: ${{ always() && env.SLACK_WEBHOOK_URL != 0 }}
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
-          name: GitHub Actions
-          icon_emoji: ':github-actions:'
-          channel: 'C02DQ1A7JLR' # _int_git channel
+          '
+        restore-keys: '${{ runner.os }}-gradle-
+
+          '
+    - continue-on-error: true
+      name: Npm cache
+      uses: actions/cache@v4
+      with:
+        key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+        path: ~/.npm
+        restore-keys: '${{ runner.os }}-npm-
+
+          '
+    - continue-on-error: true
+      name: Node cache
+      uses: actions/cache@v4
+      with:
+        key: ${{ runner.os }}-node-${{ hashFiles('ui/*.gradle') }}
+        path: node
+        restore-keys: '${{ runner.os }}-node-
+
+          '
+    - continue-on-error: true
+      name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: 21
+    - continue-on-error: true
+      env:
+        ORG_GRADLE_PROJECT_sonatypePassword: ${{ secrets.SONATYPE_PASSWORD }}
+        ORG_GRADLE_PROJECT_sonatypeUsername: ${{ secrets.SONATYPE_USER }}
+        SONATYPE_GPG_FILE: ${{ secrets.SONATYPE_GPG_FILE }}
+        SONATYPE_GPG_KEYID: ${{ secrets.SONATYPE_GPG_KEYID }}
+        SONATYPE_GPG_PASSWORD: ${{ secrets.SONATYPE_GPG_PASSWORD }}
+      if: github.ref == 'refs/heads/develop'
+      name: Publish package to Sonatype
+      run: 'mkdir -p ~/.gradle/
+
+        echo "signing.keyId=${SONATYPE_GPG_KEYID}" > ~/.gradle/gradle.properties
+
+        echo "signing.password=${SONATYPE_GPG_PASSWORD}" >> ~/.gradle/gradle.properties
+
+        echo "signing.secretKeyRingFile=${HOME}/.gradle/secring.gpg" >> ~/.gradle/gradle.properties
+
+        echo ${SONATYPE_GPG_FILE} | base64 -d > ~/.gradle/secring.gpg
+
+        ./gradlew publishToSonatype --no-daemon --priority=normal
+
+        '
+    - continue-on-error: true
+      env:
+        ORG_GRADLE_PROJECT_sonatypePassword: ${{ secrets.SONATYPE_PASSWORD }}
+        ORG_GRADLE_PROJECT_sonatypeUsername: ${{ secrets.SONATYPE_USER }}
+        SONATYPE_GPG_FILE: ${{ secrets.SONATYPE_GPG_FILE }}
+        SONATYPE_GPG_KEYID: ${{ secrets.SONATYPE_GPG_KEYID }}
+        SONATYPE_GPG_PASSWORD: ${{ secrets.SONATYPE_GPG_PASSWORD }}
+      if: startsWith(github.ref, 'refs/tags/v')
+      name: Release package to Maven Central
+      run: 'echo "signing.keyId=${SONATYPE_GPG_KEYID}" > ~/.gradle/gradle.properties
+
+        echo "signing.password=${SONATYPE_GPG_PASSWORD}" >> ~/.gradle/gradle.properties
+
+        echo "signing.secretKeyRingFile=${HOME}/.gradle/secring.gpg" >> ~/.gradle/gradle.properties
+
+        echo ${SONATYPE_GPG_FILE} | base64 -d > ~/.gradle/secring.gpg
+
+        ./gradlew publishToSonatype closeAndReleaseSonatypeStagingRepository --no-daemon
+        --priority=normal
+
+        '
+name: Main
+on:
+  repository_dispatch:
+    types: trigger-ga___main.yml
